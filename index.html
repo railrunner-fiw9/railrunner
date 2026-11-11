@@ -30,9 +30,9 @@ html,body{margin:0;height:100%;overflow:hidden;background:#0b1020;font-family:sy
 import * as THREE from 'three';
 const $=id=>document.getElementById(id);
 const canvas=$('c');
-const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
-renderer.shadowMap.enabled=true;
+const renderer=new THREE.WebGLRenderer({canvas,antialias:false,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.25));
+renderer.shadowMap.enabled=false;
 const scene=new THREE.Scene();
 const SKY=0x7ec8f0;
 scene.background=new THREE.Color(SKY);
@@ -40,7 +40,7 @@ scene.fog=new THREE.Fog(0xcfe8f7,35,125);
 const camera=new THREE.PerspectiveCamera(60,1,0.1,200);
 scene.add(new THREE.HemisphereLight(0xffffff,0x6b7a8f,1.0));
 const sun=new THREE.DirectionalLight(0xfff1d0,1.6);
-sun.position.set(-12,24,10);sun.castShadow=true;
+sun.position.set(-12,24,10);sun.castShadow=false;
 sun.shadow.mapSize.set(1024,1024);
 Object.assign(sun.shadow.camera,{left:-18,right:18,top:18,bottom:-40,near:1,far:70});
 scene.add(sun);scene.add(sun.target);
@@ -157,10 +157,11 @@ function spawnRow(){
   }
 }
 // input from pose
-const input={lane:1,jump:false,duck:false};
+const input={lane:1,jump:false,duck:false,jt:0};
 function applyInput(dt){
   S.lane=input.lane;
-  if(input.jump&&S.y<=0.01&&S.ducking<=0){S.vy=9.2;input.jump=false;}
+  if(input.jump&&performance.now()-input.jt>300)input.jump=false;
+  if(input.jump&&S.y<=0.05&&S.ducking<=0){S.vy=9.2;input.jump=false;}
   if(input.duck){S.ducking=0.75;if(S.y>0.05)S.vy=Math.min(S.vy,-14);input.duck=false;}
 }
 function die(){
@@ -182,7 +183,7 @@ function update(dt){
     S.speed=Math.min(34,16+S.dist/60);
     S.dist+=dz;
     applyInput(dt);
-    S.x+=(LX[S.lane]-S.x)*Math.min(1,dt*14);
+    S.x+=(LX[S.lane]-S.x)*Math.min(1,dt*24);
     // vertical
     const ground=S.onTrain?3.7:0;
     S.vy-=26*dt;S.y+=S.vy*dt;
@@ -246,7 +247,7 @@ async function startCamera(){
   try{
     const vision=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
     const fileset=await vision.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
-    const opts=d=>({baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',delegate:d},runningMode:'VIDEO',numPoses:1,minPoseDetectionConfidence:.5,minPosePresenceConfidence:.5,minTrackingConfidence:.5});
+    const opts=d=>({baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',delegate:d},runningMode:'VIDEO',numPoses:1,minPoseDetectionConfidence:.5,minPosePresenceConfidence:.4,minTrackingConfidence:.4});
     try{landmarker=await vision.PoseLandmarker.createFromOptions(fileset,opts('GPU'));}
     catch(e){landmarker=await vision.PoseLandmarker.createFromOptions(fileset,opts('CPU'));}
     window.__draw=(lm)=>drawPose(lm);
@@ -256,7 +257,7 @@ async function startCamera(){
 $('ent').onclick=startCamera;
 const CONN=[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[24,26],[25,27],[26,28]];
 function drawPose(lm){
-  ov.width=video.videoWidth||640;ov.height=video.videoHeight||480;octx.clearRect(0,0,ov.width,ov.height);
+  const vw=video.videoWidth||640,vh=video.videoHeight||480;if(ov.width!==vw||ov.height!==vh){ov.width=vw;ov.height=vh;}else octx.clearRect(0,0,vw,vh);
   if(!lm)return;octx.strokeStyle='#4ff0c0';octx.lineWidth=4;
   for(const[a,b]of CONN){octx.beginPath();octx.moveTo(lm[a].x*ov.width,lm[a].y*ov.height);octx.lineTo(lm[b].x*ov.width,lm[b].y*ov.height);octx.stroke();}
   octx.fillStyle='#ffd23f';for(const i of[0,11,12,23,24]){octx.beginPath();octx.arc(lm[i].x*ov.width,lm[i].y*ov.height,6,0,7);octx.fill();}
@@ -268,7 +269,7 @@ function readPose(){
   const lm=res.landmarks&&res.landmarks[0];drawPose(lm);
   if(!lm){if(now-sig.lastSeen>600)sig.present=false;return;}
   const l=lm[11],r=lm[12];
-  if(l.visibility<.5||r.visibility<.5){return;}
+  if(l.visibility<.35||r.visibility<.35){return;}
   const sw=Math.max(0.05,Math.hypot(l.x-r.x,l.y-r.y));
   sig.present=true;sig.lastSeen=now;sig.sw=sw;
   sig.x=(l.x+r.x)/2;sig.y=(l.y+r.y)/2;
@@ -279,41 +280,46 @@ function readPose(){
   else if(S.state==='run'&&baseline)control(now);
 }
 // calibration: stand still ~1.5s
-function startCalib(){S.state='calib';samples=[];baseline=null;calibStart=0;setMsg('עמדו מול המצלמה','עמדו בערך מטר וחצי ממנה, שהכתפיים והראש ייראו במלואם. עומדים ישר ושקט כדי שנכייל.','');}
+function startCalib(){S.state='calib';samples=[];sx=null;baseline=null;calibStart=0;setMsg('עמדו מול המצלמה','עמדו בערך מטר וחצי ממנה, שהכתפיים והראש ייראו במלואם. עומדים ישר ושקט כדי שנכייל.','');}
 function calibStep(now){
   if(!sig.present){samples=[];calibStart=0;setMsg('לא רואה אתכם','זזו אחורה כך שהכתפיים והראש נראים במצלמה.');return;}
   if(!calibStart)calibStart=now;
   samples.push({x:sig.x,y:sig.y,sw:sig.sw});
   const el=(now-calibStart)/1000;
-  const rec=samples.filter((s,i)=>i>samples.length-20);
+  const rec=samples.slice(-12);
   const spread=Math.max(...rec.map(s=>s.x))-Math.min(...rec.map(s=>s.x));
   const spreadY=Math.max(...rec.map(s=>s.y))-Math.min(...rec.map(s=>s.y));
-  if(spread>0.06||spreadY>0.06){calibStart=now;samples=[];setMsg('עמדו ישר ושקט','מכיילים... אל תזוזו רגע.');return;}
-  setMsg('מכיילים...','עומדים ישר ושקט',Math.max(1,Math.ceil(1.6-el)));
-  if(el>=1.6&&samples.length>12){
+  if(spread>0.14||spreadY>0.14){calibStart=now;samples=[];setMsg('עמדו ישר ושקט','מכיילים... אל תזוזו רגע.');return;}
+  setMsg('מכיילים...','עומדים ישר ושקט',Math.max(1,Math.ceil(1.0-el)));
+  if(el>=1.0&&samples.length>8){
     const avg=k=>samples.reduce((a,s)=>a+s[k],0)/samples.length;
-    baseline={x:avg('x'),y:avg('y'),sw:avg('sw')};yHist=[];laneState=1;
+    baseline={x:avg('x'),y:avg('y'),sw:avg('sw')};sx=null;yHist=[];laneState=1;
     $('hint').textContent='קפצו = קפיצה · התכופפו = גלגול · הזיזו את הגוף ימינה/שמאלה = החלפת נתיב';
     setTimeout(()=>$('hint').textContent='',9000);
     reset();
   }
 }
+let sx=null,sy=null;
 function control(now){
   const b=baseline;
-  // slow drift adaption of baseline while upright & still
-  const dx=-(sig.x-b.x)/b.sw; // mirrored: moving to your right moves screen-x left in raw image -> positive = right
-  const dy=(sig.y-b.y)/b.sw;  // positive = lower
-  // lane with hysteresis
-  if(laneState===1){if(dx>0.6)laneState=2;else if(dx<-0.6)laneState=0;}
-  else if(laneState===2){if(dx<0.25)laneState=1;}
-  else if(laneState===0){if(dx>-0.25)laneState=1;}
+  // light smoothing (fast): keeps jitter out without adding noticeable delay
+  if(sx===null){sx=sig.x;sy=sig.y;}
+  sx+=(sig.x-sx)*0.7;sy+=(sig.y-sy)*0.75;
+  const dx=-(sx-b.x)/b.sw;
+  const dy=(sy-b.y)/b.sw;
+  // lane with hysteresis (lower thresholds = quicker response)
+  if(laneState===1){if(dx>0.42)laneState=2;else if(dx<-0.42)laneState=0;}
+  else if(laneState===2){if(dx<0.18)laneState=1;}
+  else if(laneState===0){if(dx>-0.18)laneState=1;}
   input.lane=laneState;
-  yHist.push({t:now,dy});while(yHist.length&&now-yHist[0].t>350)yHist.shift();
-  const minDy=Math.min(...yHist.map(h=>h.dy)),maxDy=Math.max(...yHist.map(h=>h.dy));
-  if(now>cooldownJ&&dy<-0.22&&S.y<0.05){input.jump=true;cooldownJ=now+500;}
-  if(now>cooldownD&&dy>0.35){input.duck=true;cooldownD=now+700;}
-  // gentle adaptation
-  if(Math.abs(dx)<0.2&&Math.abs(dy)<0.12){b.y+=(sig.y-b.y)*0.005;b.x+=(sig.x-b.x)*0.005;}
+  // velocity based jump/duck: fire as soon as the rise/drop starts
+  yHist.push({t:now,dy});while(yHist.length&&now-yHist[0].t>200)yHist.shift();
+  const first=yHist[0],vel=(yHist.length>1)?(dy-first.dy)/Math.max(0.05,(now-first.t)/1000):0; // sw/sec, negative = rising
+  const jumpNow=dy<-0.15||(dy<-0.07&&vel<-1.1);
+  const duckNow=dy>0.26||(dy>0.12&&vel>1.3);
+  if(now>cooldownJ&&jumpNow){input.jump=true;input.jt=now;cooldownJ=now+380;}
+  if(now>cooldownD&&duckNow&&!jumpNow){input.duck=true;cooldownD=now+550;}
+  if(Math.abs(dx)<0.2&&Math.abs(dy)<0.1){b.y+=(sy-b.y)*0.004;b.x+=(sx-b.x)*0.004;}
 }
 function startCountdown(){S.state='calib';clearAll();S.speed=16;samples=[];calibStart=0;baseline=null;
   if(landmarker)setMsg('סיבוב חדש','עמדו ישר מול המצלמה כדי להתחיל שוב...');}
@@ -322,10 +328,12 @@ function startCountdown(){S.state='calib';clearAll();S.speed=16;samples=[];calib
 let last=performance.now(),poseAcc=0;
 function frame(now){
   const dt=Math.min(0.05,(now-last)/1000);last=now;
-  poseAcc+=dt;if(poseAcc>0.025){poseAcc=0;readPose();}
+  if(!window.__rvfc)readPose();
   update(dt);renderer.render(scene,camera);requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+function vfc(){video.requestVideoFrameCallback(()=>{readPose();vfc();});}
+if('requestVideoFrameCallback' in HTMLVideoElement.prototype){window.__rvfc=true;video.addEventListener('playing',()=>{if(!window.__vfcOn){window.__vfcOn=true;vfc();}});}
 // test hooks (state inspection / simulated pose input; no on-screen controls)
 window.__game={S,input,items,coins,reset,startCalib,get baseline(){return baseline;},setSig(o){Object.assign(sig,o);},ctl:control,calibStep};
 startCamera();

@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>רץ מסילות - משחק בשליטת גוף</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#0b1020;font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;color:#fff;-webkit-user-select:none;user-select:none}
+#c{position:fixed;inset:0;width:100%;height:100%;display:block}
+#hud{position:fixed;top:10px;left:12px;right:12px;display:flex;justify-content:space-between;pointer-events:none;font-weight:800;text-shadow:0 2px 6px #000a;font-size:clamp(16px,3.6vw,28px);z-index:3}
+#cam{position:fixed;bottom:10px;left:10px;width:min(34vw,220px);aspect-ratio:4/3;border:3px solid #ffd23f;border-radius:12px;overflow:hidden;z-index:4;background:#000;box-shadow:0 4px 18px #0008}
+#cam video,#cam canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+#msg{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;z-index:5;background:rgba(8,12,30,.72);padding:20px;gap:10px;transition:opacity .25s}
+#msg.hide{opacity:0;pointer-events:none}
+#msg h1{margin:0;font-size:clamp(28px,7vw,56px);color:#ffd23f;text-shadow:0 4px 0 #b3541e}
+#msg p{margin:0;font-size:clamp(16px,3.2vw,24px);max-width:640px;line-height:1.5}
+#big{font-size:clamp(48px,14vw,120px);font-weight:900;color:#4ff0c0}
+#hint{position:fixed;bottom:14px;right:0;left:0;text-align:center;font-weight:700;font-size:clamp(14px,2.6vw,20px);z-index:3;text-shadow:0 2px 6px #000;pointer-events:none}
+#ent{margin-top:8px;padding:14px 28px;font-size:20px;font-weight:800;border:0;border-radius:12px;background:#ffd23f;color:#222;display:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div>🪙 <span id="coins">0</span></div><div><span id="dist">0</span> מ׳</div></div>
+<div id="cam"><video id="v" playsinline muted></video><canvas id="ov"></canvas></div>
+<div id="hint"></div>
+<div id="msg"><h1 id="t">רץ מסילות</h1><p id="p">טוען את המשחק...</p><div id="big"></div><button id="ent">הפעל מצלמה</button></div>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}</script>
+<script type="module">
+import * as THREE from 'three';
+const $=id=>document.getElementById(id);
+const canvas=$('c');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled=true;
+const scene=new THREE.Scene();
+const SKY=0x7ec8f0;
+scene.background=new THREE.Color(SKY);
+scene.fog=new THREE.Fog(0xcfe8f7,35,125);
+const camera=new THREE.PerspectiveCamera(60,1,0.1,200);
+scene.add(new THREE.HemisphereLight(0xffffff,0x6b7a8f,1.0));
+const sun=new THREE.DirectionalLight(0xfff1d0,1.6);
+sun.position.set(-12,24,10);sun.castShadow=true;
+sun.shadow.mapSize.set(1024,1024);
+Object.assign(sun.shadow.camera,{left:-18,right:18,top:18,bottom:-40,near:1,far:70});
+scene.add(sun);scene.add(sun.target);
+function resize(){const w=innerWidth,h=innerHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
+addEventListener('resize',resize);resize();
+
+const LANE=2.6, LX=[-LANE,0,LANE];
+const mat=(c,o={})=>new THREE.MeshStandardMaterial({color:c,roughness:.75,metalness:.05,...o});
+const box=(w,h,d,m)=>{const x=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);x.castShadow=true;x.receiveShadow=true;return x;};
+
+// ground / tracks
+const world=new THREE.Group();scene.add(world);
+const gravel=new THREE.Mesh(new THREE.PlaneGeometry(60,400),mat(0x8d8579));
+gravel.rotation.x=-Math.PI/2;gravel.position.z=-150;gravel.receiveShadow=true;scene.add(gravel);
+const railMat=mat(0xc9ced6,{metalness:.6,roughness:.35});
+for(const x of LX){for(const dx of[-0.7,0.7]){const r=box(0.12,0.12,400,railMat);r.position.set(x+dx,0.08,-150);scene.add(r);}}
+const sleepers=[];const slMat=mat(0x6b4a2f);
+const SL_N=70,SL_GAP=2;
+for(let i=0;i<SL_N;i++)for(const x of LX){const s=box(2.0,0.1,0.45,slMat);s.position.set(x,0.03,-i*SL_GAP+10);scene.add(s);sleepers.push(s);}
+// side walls + buildings
+const buildings=[];
+const bcols=[0xe86a5a,0x5aa0e8,0xf2c14e,0x7d6bd1,0x58c4a3,0xd9d2c5];
+function makeBuilding(side,z){
+  const h=8+Math.random()*22,w=5+Math.random()*4,d=8+Math.random()*6;
+  const g=new THREE.Group();
+  const b=box(w,h,d,mat(bcols[Math.floor(Math.random()*bcols.length)]));b.position.y=h/2;g.add(b);
+  const wm=new THREE.MeshBasicMaterial({color:0xfff2a8});
+  for(let y=2;y<h-1;y+=2.4)for(let k=-1;k<=1;k++){const win=new THREE.Mesh(new THREE.PlaneGeometry(0.9,1.2),Math.random()<.65?wm:new THREE.MeshBasicMaterial({color:0x2a3a55}));
+    win.position.set(side>0?-w/2-0.01:w/2+0.01,y,k*d/3.2);win.rotation.y=side>0?-Math.PI/2:Math.PI/2;g.add(win);}
+  g.position.set(side*(11+w/2+Math.random()*3),0,z);g.userData.side=side;scene.add(g);buildings.push(g);
+}
+for(let i=0;i<14;i++){makeBuilding(-1,-i*14+5);makeBuilding(1,-i*14+5);}
+// graffiti side walls (low)
+const wallMat=mat(0xb9b0a3);
+for(const s of[-1,1]){const w=box(0.6,3.2,400,wallMat);w.position.set(s*(LANE+4.6),1.6,-150);scene.add(w);}
+
+// player
+const player=new THREE.Group();scene.add(player);
+const skin=mat(0xf1c196),hood=mat(0xff4f6d),pants=mat(0x2d3a8c),shoe=mat(0xffffff),cap=mat(0x1fb5a5);
+const body=new THREE.Group();player.add(body);
+const torso=box(0.75,0.95,0.45,hood);torso.position.y=1.5;body.add(torso);
+const head=new THREE.Mesh(new THREE.SphereGeometry(0.28,16,12),skin);head.position.y=2.25;head.castShadow=true;body.add(head);
+const capM=new THREE.Mesh(new THREE.SphereGeometry(0.31,16,8,0,Math.PI*2,0,Math.PI/2),cap);capM.position.y=2.3;body.add(capM);
+const brim=box(0.5,0.05,0.35,cap);brim.position.set(0,2.32,0.3);body.add(brim);
+const bag=box(0.55,0.7,0.25,mat(0xffd23f));bag.position.set(0,1.55,-0.35);body.add(bag);
+function limb(x,y,w,h,m){const p=new THREE.Group();p.position.set(x,y,0);const l=box(w,h,w,m);l.position.y=-h/2;p.add(l);body.add(p);return p;}
+const armL=limb(-0.5,1.9,0.22,0.8,hood),armR=limb(0.5,1.9,0.22,0.8,hood);
+const legL=limb(-0.2,1.05,0.28,1.0,pants),legR=limb(0.2,1.05,0.28,1.0,pants);
+for(const l of[legL,legR]){const f=box(0.3,0.15,0.5,shoe);f.position.set(0,-1.0,0.1);l.add(f);}
+
+// pools
+const trainCols=[0xd64545,0x3b82c4,0x2fa36b,0xe0a030];
+const items=[]; // {mesh,type,lane,len,h,bottom}
+function mkTrain(lane,z,len){
+  const g=new THREE.Group();const c=trainCols[Math.floor(Math.random()*4)];
+  const b=box(2.3,3.4,len,mat(c));b.position.y=1.9;g.add(b);
+  const stripe=box(2.34,0.4,len+0.02,mat(0xffffff));stripe.position.y=2.2;g.add(stripe);
+  const roof=box(2.1,0.2,len-0.4,mat(0x555b66));roof.position.y=3.7;g.add(roof);
+  const front=new THREE.Mesh(new THREE.PlaneGeometry(1.4,0.9),new THREE.MeshBasicMaterial({color:0xaee6ff}));front.position.set(0,2.7,len/2+0.02);g.add(front);
+  const lamp=new THREE.Mesh(new THREE.CircleGeometry(0.2,12),new THREE.MeshBasicMaterial({color:0xfff7a0}));lamp.position.set(0.6,1.1,len/2+0.03);g.add(lamp);
+  g.position.set(LX[lane],0,z);scene.add(g);
+  return{mesh:g,type:'train',lane,len,top:3.6};
+}
+function mkBarrier(lane,z){
+  const g=new THREE.Group();
+  const a=box(2.3,0.35,0.35,mat(0xff7a00));a.position.y=0.95;g.add(a);
+  const a2=box(2.3,0.35,0.36,mat(0xffffff));a2.position.y=0.55;g.add(a2);
+  for(const x of[-1,1]){const p=box(0.14,1.2,0.14,mat(0x444444));p.position.set(x*1.05,0.6,0);g.add(p);}
+  g.position.set(LX[lane],0,z);scene.add(g);return{mesh:g,type:'barrier',lane,len:0.5,top:1.15};
+}
+function mkBar(lane,z){
+  const g=new THREE.Group();
+  for(const x of[-1.1,1.1]){const p=box(0.18,2.4,0.18,mat(0x555555));p.position.set(x,1.2,0);g.add(p);}
+  const b=box(2.4,0.8,0.3,mat(0x8e44ad));b.position.y=2.0;g.add(b);
+  const st=box(2.42,0.18,0.32,mat(0xffd23f));st.position.y=2.0;g.add(st);
+  g.position.set(LX[lane],0,z);scene.add(g);return{mesh:g,type:'bar',lane,len:0.4,bottom:1.55};
+}
+const coinGeo=new THREE.CylinderGeometry(0.34,0.34,0.08,16);coinGeo.rotateX(Math.PI/2);
+const coinMat=mat(0xffc400,{metalness:.7,roughness:.25,emissive:0x553a00});
+const coins=[];
+function mkCoin(lane,z,y=1.1){const m=new THREE.Mesh(coinGeo,coinMat);m.position.set(LX[lane],y,z);m.castShadow=true;scene.add(m);coins.push(m);}
+
+// state
+const S={state:'wait',speed:16,dist:0,coins:0,lane:1,x:0,y:0,vy:0,ducking:0,onTrain:false,t:0,nextZ:-30,over:0,hit:0,spawnedAt:0};
+function clearAll(){for(const i of items)scene.remove(i.mesh);items.length=0;for(const c of coins)scene.remove(c);coins.length=0;}
+function reset(){clearAll();Object.assign(S,{state:'run',speed:16,dist:0,coins:0,lane:1,x:0,y:0,vy:0,ducking:0,nextZ:-35,hit:0});
+  $('msg').classList.add('hide');}
+function spawnRow(){
+  const z=S.nextZ;const r=Math.random();
+  const free=Math.floor(Math.random()*3);
+  if(r<0.3){ // trains in two lanes, free lane has coins
+    const len=8+Math.random()*10;
+    for(let l=0;l<3;l++)if(l!==free)items.push(mkTrain(l,z-len/2,len));
+    for(let k=0;k<6;k++)mkCoin(free,z+4-k*2.2);
+    S.nextZ-=len+14;
+  }else if(r<0.55){ // low barriers (jump)
+    const lanes=[0,1,2].filter(()=>Math.random()<.7);if(!lanes.length)lanes.push(free);
+    for(const l of lanes)items.push(mkBarrier(l,z));
+    if(lanes.length<3)for(const l of[0,1,2])if(!lanes.includes(l))for(let k=0;k<4;k++)mkCoin(l,z+3-k*2);
+    for(let k=0;k<3;k++)mkCoin(lanes[0],z+(k-1)*1.4,2.2+(k===1?.4:0));
+    S.nextZ-=16;
+  }else if(r<0.78){ // overhead bars (duck)
+    const l=Math.floor(Math.random()*3);
+    items.push(mkBar(l,z));if(Math.random()<.6)items.push(mkBar((l+1)%3,z));
+    for(let k=0;k<5;k++)mkCoin(l,z+4-k*2,0.9);
+    S.nextZ-=16;
+  }else if(r<0.9){ // train with coin line on... plain coins
+    const l=Math.floor(Math.random()*3);
+    for(let k=0;k<8;k++)mkCoin(l,z-k*2);
+    S.nextZ-=20;
+  }else{ // wall of trains with one gap lane
+    const len=6;for(let l=0;l<3;l++)if(l!==free)items.push(mkTrain(l,z-len/2,len));
+    S.nextZ-=len+12;
+  }
+}
+// input from pose
+const input={lane:1,jump:false,duck:false};
+function applyInput(dt){
+  S.lane=input.lane;
+  if(input.jump&&S.y<=0.01&&S.ducking<=0){S.vy=9.2;input.jump=false;}
+  if(input.duck){S.ducking=0.75;if(S.y>0.05)S.vy=Math.min(S.vy,-14);input.duck=false;}
+}
+function die(){
+  S.state='over';S.over=5.5;
+  $('t').textContent='התנגשת!';
+  $('p').textContent='מרחק: '+Math.floor(S.dist)+' מ׳ · מטבעות: '+S.coins+'\nעומד/ת במקום, מתחילים שוב בעוד רגע';
+  $('big').textContent='';
+  $('msg').classList.remove('hide');
+}
+function update(dt){
+  S.t+=dt;
+  // always scroll scenery slowly in menu
+  const sp=S.state==='run'?S.speed:(S.state==='wait'||S.state==='calib'?6:0);
+  const dz=sp*dt;
+  for(const s of sleepers){s.position.z+=dz;if(s.position.z>12)s.position.z-=SL_N*SL_GAP;}
+  for(const b of buildings){b.position.z+=dz*.98;if(b.position.z>30)b.position.z-=14*14;}
+  if(S.state==='over'){S.over-=dt;$('big').textContent=Math.max(0,Math.ceil(S.over));if(S.over<=0){startCountdown();}}
+  if(S.state==='run'){
+    S.speed=Math.min(34,16+S.dist/60);
+    S.dist+=dz;
+    applyInput(dt);
+    S.x+=(LX[S.lane]-S.x)*Math.min(1,dt*14);
+    // vertical
+    const ground=S.onTrain?3.7:0;
+    S.vy-=26*dt;S.y+=S.vy*dt;
+    if(S.y<=0){S.y=0;S.vy=0;}
+    S.ducking=Math.max(0,S.ducking-dt);
+    // spawn & move
+    while(S.nextZ>-120)spawnRow();
+    S.nextZ+=dz;
+    for(let i=items.length-1;i>=0;i--){const it=items[i];it.mesh.position.z+=dz;
+      const pz=it.mesh.position.z,px=it.mesh.position.x;
+      if(pz>8){scene.remove(it.mesh);items.splice(i,1);continue;}
+      if(Math.abs(px-S.x)<1.0&&Math.abs(pz)<it.len/2+0.35){
+        const feet=S.y,headTop=S.y+(S.ducking>0?0.9:2.5);
+        if(it.type==='train'){ if(feet<it.top-0.25) return die(); }
+        else if(it.type==='barrier'){ if(feet<it.top-0.2) return die(); }
+        else if(it.type==='bar'){ if(headTop>it.bottom) return die(); }
+      }
+    }
+    for(let i=coins.length-1;i>=0;i--){const c=coins[i];c.position.z+=dz;c.rotation.y+=dt*4;
+      if(c.position.z>8){scene.remove(c);coins.splice(i,1);continue;}
+      if(Math.abs(c.position.z)<0.9&&Math.abs(c.position.x-S.x)<0.9&&Math.abs(c.position.y-(S.y+1.1))<1.3){S.coins++;scene.remove(c);coins.splice(i,1);}}
+    $('coins').textContent=S.coins;$('dist').textContent=Math.floor(S.dist);
+  }
+  // animate player
+  player.position.x=S.x;player.position.y=S.y;
+  const run=S.state==='run'||S.state==='wait'||S.state==='calib';
+  const ph=S.t*(S.state==='run'?S.speed*0.55:8);
+  const air=S.y>0.1;
+  legL.rotation.x=air?-0.8:Math.sin(ph)*0.9;legR.rotation.x=air?0.6:-Math.sin(ph)*0.9;
+  armL.rotation.x=air?-2.4:-Math.sin(ph)*0.9;armR.rotation.x=air?-2.4:Math.sin(ph)*0.9;
+  body.position.y=air?0:Math.abs(Math.sin(ph))*0.08;
+  const duck=S.ducking>0;
+  body.rotation.x+= ((duck?0.9:(S.state==='over'?-0.6:0.12))-body.rotation.x)*Math.min(1,dt*16);
+  body.scale.y+=((duck?0.62:1)-body.scale.y)*Math.min(1,dt*16);
+  body.rotation.z=(LX[S.lane]-S.x)*-0.06;
+  // camera
+  const cx=S.x*0.55;
+  camera.position.x+=(cx-camera.position.x)*Math.min(1,dt*6);
+  camera.position.set(camera.position.x,4.6,8.2);
+  camera.lookAt(cx*0.6,1.6,-9);
+  const fov=60+Math.min(14,(S.speed-16)*0.8);camera.fov+=(fov-camera.fov)*dt*2;camera.updateProjectionMatrix();
+  sun.target.position.set(0,0,-8);
+}
+
+// ---- camera + pose ----
+const video=$('v'),ov=$('ov'),octx=ov.getContext('2d');
+let landmarker=null,camReady=false,lastVT=-1,baseline=null,calibStart=0,samples=[];
+const sig={x:0,y:0,present:false,lastSeen:0};
+let yHist=[],cooldownJ=0,cooldownD=0,laneState=1;
+function setMsg(t,p,big=''){ $('t').textContent=t;$('p').textContent=p;$('big').textContent=big;$('msg').classList.remove('hide'); }
+async function startCamera(){
+  $('ent').style.display='none';
+  setMsg('רץ מסילות','מפעיל מצלמה... אשרו גישה למצלמה כשהדפדפן שואל. הווידאו לא יוצא מהמכשיר.');
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480},frameRate:{ideal:30}},audio:false});
+    video.srcObject=stream;await video.play();camReady=true;
+  }catch(e){
+    setMsg('צריך מצלמה','המשחק נשלט רק בתנועות הגוף. אשרו גישה למצלמה בדפדפן ולחצו כאן.');$('ent').style.display='block';return;
+  }
+  setMsg('רץ מסילות','טוען מנוע זיהוי תנועה...');
+  try{
+    const vision=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+    const fileset=await vision.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+    const opts=d=>({baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',delegate:d},runningMode:'VIDEO',numPoses:1,minPoseDetectionConfidence:.5,minPosePresenceConfidence:.5,minTrackingConfidence:.5});
+    try{landmarker=await vision.PoseLandmarker.createFromOptions(fileset,opts('GPU'));}
+    catch(e){landmarker=await vision.PoseLandmarker.createFromOptions(fileset,opts('CPU'));}
+    window.__draw=(lm)=>drawPose(lm);
+    startCalib();
+  }catch(e){setMsg('שגיאה','לא הצלחתי לטעון את מנוע הזיהוי. בדקו חיבור לאינטרנט ורעננו.');console.error(e);}
+}
+$('ent').onclick=startCamera;
+const CONN=[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[24,26],[25,27],[26,28]];
+function drawPose(lm){
+  ov.width=video.videoWidth||640;ov.height=video.videoHeight||480;octx.clearRect(0,0,ov.width,ov.height);
+  if(!lm)return;octx.strokeStyle='#4ff0c0';octx.lineWidth=4;
+  for(const[a,b]of CONN){octx.beginPath();octx.moveTo(lm[a].x*ov.width,lm[a].y*ov.height);octx.lineTo(lm[b].x*ov.width,lm[b].y*ov.height);octx.stroke();}
+  octx.fillStyle='#ffd23f';for(const i of[0,11,12,23,24]){octx.beginPath();octx.arc(lm[i].x*ov.width,lm[i].y*ov.height,6,0,7);octx.fill();}
+}
+function readPose(){
+  if(!landmarker||!camReady||video.readyState<2||video.currentTime===lastVT)return;
+  lastVT=video.currentTime;const now=performance.now();
+  let res;try{res=landmarker.detectForVideo(video,now);}catch(e){return;}
+  const lm=res.landmarks&&res.landmarks[0];drawPose(lm);
+  if(!lm){if(now-sig.lastSeen>600)sig.present=false;return;}
+  const l=lm[11],r=lm[12];
+  if(l.visibility<.5||r.visibility<.5){return;}
+  const sw=Math.max(0.05,Math.hypot(l.x-r.x,l.y-r.y));
+  sig.present=true;sig.lastSeen=now;sig.sw=sw;
+  sig.x=(l.x+r.x)/2;sig.y=(l.y+r.y)/2;
+  // hips also help lean/lane
+  const hp=(lm[23].visibility>.4&&lm[24].visibility>.4)?(lm[23].x+lm[24].x)/2:null;
+  sig.hx=hp;
+  if(S.state==='calib')calibStep(now);
+  else if(S.state==='run'&&baseline)control(now);
+}
+// calibration: stand still ~1.5s
+function startCalib(){S.state='calib';samples=[];baseline=null;calibStart=0;setMsg('עמדו מול המצלמה','עמדו בערך מטר וחצי ממנה, שהכתפיים והראש ייראו במלואם. עומדים ישר ושקט כדי שנכייל.','');}
+function calibStep(now){
+  if(!sig.present){samples=[];calibStart=0;setMsg('לא רואה אתכם','זזו אחורה כך שהכתפיים והראש נראים במצלמה.');return;}
+  if(!calibStart)calibStart=now;
+  samples.push({x:sig.x,y:sig.y,sw:sig.sw});
+  const el=(now-calibStart)/1000;
+  const rec=samples.filter((s,i)=>i>samples.length-20);
+  const spread=Math.max(...rec.map(s=>s.x))-Math.min(...rec.map(s=>s.x));
+  const spreadY=Math.max(...rec.map(s=>s.y))-Math.min(...rec.map(s=>s.y));
+  if(spread>0.06||spreadY>0.06){calibStart=now;samples=[];setMsg('עמדו ישר ושקט','מכיילים... אל תזוזו רגע.');return;}
+  setMsg('מכיילים...','עומדים ישר ושקט',Math.max(1,Math.ceil(1.6-el)));
+  if(el>=1.6&&samples.length>12){
+    const avg=k=>samples.reduce((a,s)=>a+s[k],0)/samples.length;
+    baseline={x:avg('x'),y:avg('y'),sw:avg('sw')};yHist=[];laneState=1;
+    $('hint').textContent='קפצו = קפיצה · התכופפו = גלגול · הזיזו את הגוף ימינה/שמאלה = החלפת נתיב';
+    setTimeout(()=>$('hint').textContent='',9000);
+    reset();
+  }
+}
+function control(now){
+  const b=baseline;
+  // slow drift adaption of baseline while upright & still
+  const dx=-(sig.x-b.x)/b.sw; // mirrored: moving to your right moves screen-x left in raw image -> positive = right
+  const dy=(sig.y-b.y)/b.sw;  // positive = lower
+  // lane with hysteresis
+  if(laneState===1){if(dx>0.6)laneState=2;else if(dx<-0.6)laneState=0;}
+  else if(laneState===2){if(dx<0.25)laneState=1;}
+  else if(laneState===0){if(dx>-0.25)laneState=1;}
+  input.lane=laneState;
+  yHist.push({t:now,dy});while(yHist.length&&now-yHist[0].t>350)yHist.shift();
+  const minDy=Math.min(...yHist.map(h=>h.dy)),maxDy=Math.max(...yHist.map(h=>h.dy));
+  if(now>cooldownJ&&dy<-0.22&&S.y<0.05){input.jump=true;cooldownJ=now+500;}
+  if(now>cooldownD&&dy>0.35){input.duck=true;cooldownD=now+700;}
+  // gentle adaptation
+  if(Math.abs(dx)<0.2&&Math.abs(dy)<0.12){b.y+=(sig.y-b.y)*0.005;b.x+=(sig.x-b.x)*0.005;}
+}
+function startCountdown(){S.state='calib';clearAll();S.speed=16;samples=[];calibStart=0;baseline=null;
+  if(landmarker)setMsg('סיבוב חדש','עמדו ישר מול המצלמה כדי להתחיל שוב...');}
+
+// loop
+let last=performance.now(),poseAcc=0;
+function frame(now){
+  const dt=Math.min(0.05,(now-last)/1000);last=now;
+  poseAcc+=dt;if(poseAcc>0.025){poseAcc=0;readPose();}
+  update(dt);renderer.render(scene,camera);requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+// test hooks (state inspection / simulated pose input; no on-screen controls)
+window.__game={S,input,items,coins,reset,startCalib,get baseline(){return baseline;},setSig(o){Object.assign(sig,o);},ctl:control,calibStep};
+startCamera();
+</script>
+</body>
+</html>
